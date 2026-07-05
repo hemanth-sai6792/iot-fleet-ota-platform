@@ -1,0 +1,155 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: #0f1115;
+  color: #e6e6e6;
+}
+
+.app {
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+h1 {
+  font-size: 1.4rem;
+  margin: 0;
+}
+
+.panel {
+  background: #171a21;
+  border: 1px solid #262b36;
+  border-radius: 8px;
+  padding: 20px;
+  margin-bottom: 20px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th, td {
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 1px solid #262b36;
+  font-size: 0.9rem;
+}
+
+.badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.badge-online { background: #16351f; color: #4ade80; }
+.badge-offline { background: #3a1e1e; color: #f87171; }
+
+.badge-rollout-running { background: #1e2c3a; color: #60a5fa; }
+.badge-rollout-completed { background: #16351f; color: #4ade80; }
+.badge-rollout-rolled_back,
+.badge-rollout-rolled_back_manual { background: #3a1e1e; color: #f87171; }
+
+.rollout-form {
+  display: flex;
+  gap: 16px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+}
+
+.rollout-form label {
+  display: flex;
+  flex-direction: column;
+  font-size: 0.8rem;
+  color: #9aa2b1;
+  gap: 4px;
+}
+
+.rollout-form input {
+  background: #0f1115;
+  border: 1px solid #262b36;
+  border-radius: 6px;
+  color: #e6e6e6;
+  padding: 6px 10px;
+  width: 140px;
+}
+
+button {
+  background: #2563eb;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 16px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.rollback-btn {
+  background: #dc2626;
+  padding: 4px 10px;
+  font-size: 0.8rem;
+}
+
+.rollout-card {
+  border: 1px solid #262b36;
+  border-radius: 8px;
+  padding: 14px;
+  margin-bottom: 12px;
+}
+
+.rollout-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.progress-bar {
+  height: 8px;
+  background: #0f1115;
+  border-radius: 4px;
+  overflow: hidden;
+  display: flex;
+}
+
+.progress-applied { background: #4ade80; height: 100%; }
+.progress-failed { background: #f87171; height: 100%; }
+
+.rollout-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 8px;
+  font-size: 0.85rem;
+  color: #9aa2b1;
+}
+
+.error {
+  color: #f87171;
+  font-size: 0.85rem;
+}
+
+.empty {
+  color: #6b7280;
+  font-style: italic;
+}

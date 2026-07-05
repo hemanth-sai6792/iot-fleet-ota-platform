@@ -1,0 +1,81 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/config/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: iot
+      POSTGRES_PASSWORD: iot
+      POSTGRES_DB: iot_fleet
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./backend/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U iot -d iot_fleet"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.api
+    environment:
+      POSTGRES_DSN: postgresql://iot:iot@postgres:5432/iot_fleet
+      MQTT_HOST: mosquitto
+      MQTT_PORT: "1883"
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mosquitto:
+        condition: service_started
+
+  core-engine:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.engine
+    environment:
+      POSTGRES_DSN: postgresql://iot:iot@postgres:5432/iot_fleet
+      MQTT_HOST: mosquitto
+      MQTT_PORT: "1883"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mosquitto:
+        condition: service_started
+
+  simulator:
+    build:
+      context: ./backend/simulator
+    environment:
+      API_URL: http://api:8000
+      MQTT_HOST: mosquitto
+      MQTT_PORT: "1883"
+      DEVICE_COUNT: "25"
+      FAILURE_RATE: "0.1"
+    depends_on:
+      - api
+      - core-engine
+
+  frontend:
+    build:
+      context: ./frontend
+    environment:
+      VITE_API_URL: http://localhost:8000
+      VITE_WS_URL: ws://localhost:8000
+    ports:
+      - "5173:5173"
+    depends_on:
+      - api
+
+volumes:
+  pgdata:

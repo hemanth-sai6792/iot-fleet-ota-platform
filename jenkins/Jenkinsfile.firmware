@@ -1,0 +1,48 @@
+// Firmware build + OTA staging pipeline: this is the pipeline that earns
+// Jenkins its place beyond generic "build and test." It packages a firmware
+// bundle, checksums it (a real code-signing/PKI setup is a separate project
+// on its own — this is the honest scope for a one-day build), stages it,
+// and kicks off a canary rollout through the same API the dashboard uses.
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'FIRMWARE_VERSION', defaultValue: '1.1.0', description: 'Version to ship')
+        string(name: 'CANARY_PERCENT', defaultValue: '20', description: 'Percent of fleet in the first wave')
+        string(name: 'FAILURE_THRESHOLD_PERCENT', defaultValue: '20', description: 'Auto-rollback threshold')
+        string(name: 'API_URL', defaultValue: 'http://api:8000', description: 'Fleet API base URL')
+    }
+
+    stages {
+        stage('Build bundle') {
+            steps {
+                dir('firmware') {
+                    sh """
+                        tar -czf firmware-${params.FIRMWARE_VERSION}.tar.gz payload.bin
+                        sha256sum firmware-${params.FIRMWARE_VERSION}.tar.gz > firmware-${params.FIRMWARE_VERSION}.sha256
+                    """
+                }
+            }
+        }
+
+        stage('Stage bundle') {
+            // Local artifact store for this demo — swap for S3/GCS + a
+            // signed URL in a real deployment.
+            steps {
+                sh 'mkdir -p firmware-store'
+                sh "cp firmware/firmware-${params.FIRMWARE_VERSION}.tar.gz firmware/firmware-${params.FIRMWARE_VERSION}.sha256 firmware-store/"
+                archiveArtifacts artifacts: "firmware-store/firmware-${params.FIRMWARE_VERSION}.*"
+            }
+        }
+
+        stage('Trigger canary rollout') {
+            steps {
+                sh """
+                    curl -sf -X POST ${params.API_URL}/rollouts \
+                        -H 'Content-Type: application/json' \
+                        -d '{"firmware_version": "${params.FIRMWARE_VERSION}", "canary_percent": ${params.CANARY_PERCENT}, "failure_threshold_percent": ${params.FAILURE_THRESHOLD_PERCENT}}'
+                """
+            }
+        }
+    }
+}
