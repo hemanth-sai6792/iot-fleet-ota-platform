@@ -12,7 +12,7 @@ from typing import Any
 import aiomqtt
 import asyncpg
 
-from app.config import MQTT_HOST, MQTT_PORT, RECONCILE_INTERVAL_SECONDS, TOPIC_DESIRED
+from app.config import RECONCILE_INTERVAL_SECONDS, TOPIC_DEVICE_DESIRED
 
 logger = logging.getLogger("shadow")
 
@@ -36,7 +36,7 @@ async def reconcile_device(
     if not delta:
         return
     await mqtt_client.publish(
-        TOPIC_DESIRED.format(device_id=device["id"]), json.dumps(delta)
+        TOPIC_DEVICE_DESIRED.format(device_id=device["id"]), json.dumps(delta)
     )
     logger.info("reconcile: pushed %s to device %s", delta, device["id"])
 
@@ -44,9 +44,10 @@ async def reconcile_device(
 async def reconciliation_loop(pool: asyncpg.Pool, mqtt_client: aiomqtt.Client) -> None:
     """Background task: periodically re-checks every device for drift.
 
-    Catches desired-state changes made through the API (e.g. a rollout)
-    that arrived after the device's last reported-state message, so a
-    silent device still eventually gets the command once it reconnects.
+    Catches desired-state changes made through the API (a scene activation,
+    a rule firing, a cascade shutdown) that arrived after the device's last
+    reported-state message, so a silent device still eventually gets the
+    command once it reconnects.
     """
     while True:
         rows = await pool.fetch(

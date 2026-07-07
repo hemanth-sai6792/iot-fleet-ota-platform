@@ -11,14 +11,14 @@ services:
     environment:
       POSTGRES_USER: iot
       POSTGRES_PASSWORD: iot
-      POSTGRES_DB: iot_fleet
+      POSTGRES_DB: home_automation
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./backend/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U iot -d iot_fleet"]
+      test: ["CMD-SHELL", "pg_isready -U iot -d home_automation"]
       interval: 3s
       timeout: 3s
       retries: 20
@@ -28,7 +28,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile.api
     environment:
-      POSTGRES_DSN: postgresql://iot:iot@postgres:5432/iot_fleet
+      POSTGRES_DSN: postgresql://iot:iot@postgres:5432/home_automation
       MQTT_HOST: mosquitto
       MQTT_PORT: "1883"
     ports:
@@ -44,7 +44,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile.engine
     environment:
-      POSTGRES_DSN: postgresql://iot:iot@postgres:5432/iot_fleet
+      POSTGRES_DSN: postgresql://iot:iot@postgres:5432/home_automation
       MQTT_HOST: mosquitto
       MQTT_PORT: "1883"
     depends_on:
@@ -60,8 +60,6 @@ services:
       API_URL: http://api:8000
       MQTT_HOST: mosquitto
       MQTT_PORT: "1883"
-      DEVICE_COUNT: "25"
-      FAILURE_RATE: "0.1"
     depends_on:
       - api
       - core-engine

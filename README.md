@@ -1,44 +1,48 @@
-# IoT Device Fleet & OTA Management Platform
+# Home & factory automation platform
 
-A staged/canary firmware-rollout platform for a fleet of IoT devices, built
-around a device-shadow (desired vs. reported state) pattern with async MQTT
-ingestion and auto-rollback. This is a scoped, one-day portfolio build — see
-[What's simulated vs. real](#whats-simulated-vs-real) for the honest cuts.
+A backend + console for a home-automation company serving three customer
+segments — household, showroom, and factory — modeled on how a real company
+in this space is structured, not a generic IoT demo. See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design rationale,
+design-pattern selection, and data model.
 
-## Architecture
+## What this is
+
+- **Household/showroom**: rooms, scenes, sensor/time/voice-triggered rules,
+  Alexa Smart Home integration — devices get added to rooms, rooms and
+  scenes get named, and those names are validated against Alexa's
+  voice-discovery constraints at creation time.
+- **Factory**: a device → unit → division hierarchy for electrical
+  appliances. Electricity is metered at the unit and division level only
+  (not per device — individually metering every appliance is cost-prohibitive
+  at factory scale). Units and divisions each have a master power switch that
+  cascades to every device inside them, with a task-safety interlock: a
+  device mid-operation (a welder mid-weld, a press mid-stroke) blocks the
+  cascade and surfaces a warning instead of being silently force-stopped.
+- **One React console**, not a mobile app — desktop/tablet is the real
+  constraint for factory floor use, so a responsive web app is genuinely
+  sufficient here.
+
+## Architecture, briefly
+
+Modular monolith, layered ports-and-adapters:
 
 ```
- [Device Simulator]  --MQTT-->  [Mosquitto broker]
-  (N asyncio clients)                  |
-                                        v
-                          [core-engine: aiomqtt ingestion,
-                           shadow reconciliation, rollout monitor]
-                                        |
-                                        v
-                                  [Postgres]
-                              (devices, partitioned
-                               telemetry, rollouts)
-                                        ^
-                                        |
-                       [FastAPI: REST + WebSocket] <---> [React dashboard]
+API (FastAPI routers) → application services (app/control.py)
+                       → domain logic (app/household.py, app/factory.py) — pure, no I/O
+                       → adapters (Postgres repos via asyncpg, AlexaAdapter, MQTT)
 ```
 
-- **core-engine** (`backend/app/engine_main.py`) — one asyncio process running
-  three logically separate loops concurrently: MQTT ingestion, device-shadow
-  reconciliation (diff desired vs. reported, push corrections), and the OTA
-  rollout monitor (failure-rate check, auto-rollback). Kept as one process for
-  this build; each loop is independent and could scale out on its own.
-- **api** (`backend/app/main.py`) — FastAPI REST for device
-  provisioning/rollout control, plus a WebSocket that pushes a fleet snapshot
-  to the dashboard on a fixed tick.
-- **Postgres** — device registry + telemetry, with telemetry **range-partitioned
-  by day** (`backend/init.sql`) so retention and recent-data queries stay cheap
-  as the table grows, instead of one unbounded row-per-reading table.
-- **simulator** (`backend/simulator/device_simulator.py`) — spawns N virtual
-  devices as concurrent asyncio/MQTT clients. This is how the ingestion path
-  and rollout engine get exercised at scale without owning real hardware.
-- **frontend** (`frontend/`) — React + Vite dashboard: live fleet table and
-  rollout panel with progress bars and a manual rollback button.
+Two runtime processes, one docker-compose stack:
+- **api** — REST + WebSocket, serves the React console
+- **core-engine** — async MQTT ingestion, shadow reconciliation (desired vs.
+  reported state, same mechanism whether it's a lamp or a factory motor),
+  and the usage/threshold/meter-reconciliation monitor
+
+Devices are the only physical MQTT clients. Units and divisions are logical
+groupings — their "master switch" is a cascade command computed by the API,
+not a separate physical MQTT identity — except for their meters, which do
+publish real readings.
 
 ## Running it
 
@@ -46,27 +50,25 @@ ingestion and auto-rollback. This is a scoped, one-day portfolio build — see
 docker compose up -d --build
 ```
 
-- API: http://localhost:8000 (docs at `/docs`)
-- Dashboard: http://localhost:5173
-- Mosquitto: `localhost:1883`
-- Postgres: `localhost:5432` (user/pass `iot`/`iot`, db `iot_fleet`)
+- API + docs: http://localhost:8000/docs
+- Console: http://localhost:5173
+- The simulator bootstraps one sample household site (3 rooms, 4 devices)
+  and one sample factory site (1 division, 2 units, 6 devices — including a
+  welder and a press machine that periodically enter a non-interruptible
+  "running_task" state, so the cascade interlock has something real to
+  block) and starts publishing over MQTT immediately.
 
-The simulator registers 25 virtual devices on startup and starts publishing
-telemetry/heartbeats immediately — the dashboard should show them going
-online within a few seconds.
-
-### Try a rollout
+### Try the cascade interlock
 
 ```bash
-curl -X POST http://localhost:8000/rollouts \
-  -H 'Content-Type: application/json' \
-  -d '{"firmware_version": "1.1.0", "canary_percent": 20, "failure_threshold_percent": 20}'
+# find the "Assembly Line 1" unit id from GET /units?division_id=..., then:
+curl -X POST http://localhost:8000/units/<unit_id>/power \
+  -H 'Content-Type: application/json' -d '{"desired_power": "off"}'
 ```
 
-Watch it complete in the dashboard's rollout panel. To see the auto-rollback
-path, bump the simulator's `FAILURE_RATE` env var (0.0-1.0) before starting a
-rollout — once enough devices report `update_status: failed`, the rollout
-monitor halts it and reverts the affected devices' desired state.
+If the welder is mid-task, it comes back in `blocked` with a message naming
+the device, unit, and division — everything else in the unit still powers
+off. Retry with `"force": true` to override (logged to `/audit` either way).
 
 ### Tests
 
@@ -74,31 +76,31 @@ monitor halts it and reverts the affected devices' desired state.
 cd backend && pip install -r requirements.txt && pytest tests/
 ```
 
-Tests cover the two pieces of pure logic that matter most: shadow-state diffing
-(`test_shadow.py`) and canary selection / rollback-threshold evaluation
-(`test_rollout.py`) — no broker or database required.
+Covers the pure logic that matters most: Alexa name validation, rule-trigger
+dispatch (`test_household.py`), cascade planning + meter reconciliation
+(`test_factory.py`), the Alexa discovery/directive adapter (`test_alexa.py`),
+and shadow-state diffing (`test_shadow.py`) — no broker or database required.
 
 ## CI/CD
 
-- `jenkins/Jenkinsfile` — app CI: install, test, SonarQube quality gate
-  (scoped to `ingestion.py` / `shadow.py` / `rollout.py` / `engine_main.py` —
-  the concurrency-bug risk is in the async loops, not repo-wide style), build
-  images.
-- `jenkins/Jenkinsfile.firmware` — the OTA-specific pipeline: builds a firmware
-  bundle from `firmware/`, checksums it, stages it, and calls the same
-  `/rollouts` API the dashboard uses to kick off a canary rollout.
-- `sonar-project.properties` — quality-gate config for the ingestion path.
+`jenkins/Jenkinsfile` — install, test, a SonarQube gate scoped to the async
+control-plane modules (`ingestion.py`, `shadow.py`, `control.py`,
+`usage_monitor.py` — where concurrency bugs actually bite when real
+appliances are on the other end), then image builds.
 
-## What's simulated vs. real
+## What's real vs. stubbed
 
-Real: async MQTT ingestion, shadow reconciliation, canary rollout selection,
-auto-rollback on failure-rate threshold, day-partitioned Postgres telemetry,
-FastAPI WebSocket push, Jenkins pipelines as actual pipeline-as-code.
+Real: the cascade/interlock logic, shadow reconciliation, meter
+reconciliation and threshold alerting, the Alexa name-validation and
+discovery/directive adapter shape, the audit trail.
 
-Simulated/simplified, on purpose, to keep this buildable in a day:
-- No real hardware — devices are asyncio/MQTT clients.
-- "Firmware signing" is a SHA-256 checksum, not real code-signing/PKI.
-- No Kubernetes — single `docker-compose` stack.
-- No auth beyond CORS wide-open (not the point of the demo).
-- Dashboard refresh is a 1.5s server-side poll broadcast over WebSocket, not
-  Postgres `LISTEN`/`NOTIFY` — simpler and plenty fast for a fleet dashboard.
+Stubbed/out of scope, on purpose:
+- **Node-RED** isn't part of this build — the simulator stands in for
+  wherever Node-RED and real hardware would normally sit. What's real is the
+  MQTT topic contract (`devices/{id}/state/...`) it would integrate against.
+- **Alexa** integration is a payload-shape adapter, not a registered Skill —
+  no Login-with-Amazon, no Lambda endpoint.
+- **Remote access/on-site fallback** is a documented operational model
+  (see ARCHITECTURE.md), not implemented infrastructure — no VPN/tunnel here.
+- No Kubernetes, no Kafka — Postgres + asyncio + a lightweight in-process
+  pub/sub is the whole story at this scale.

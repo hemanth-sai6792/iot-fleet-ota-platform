@@ -1,7 +1,4 @@
-// App CI: lint + test + quality gate + image build for the backend services.
-// This is generic build/test pipeline — the OTA-specific pipeline lives in
-// Jenkinsfile.firmware, which is where Jenkins does something this project
-// specifically needs.
+// App CI: install, test, quality gate, image build for the backend + frontend.
 pipeline {
     agent any
 
@@ -32,12 +29,13 @@ pipeline {
         }
 
         stage('SonarQube quality gate') {
-            // Scoped to the ingestion/shadow/rollout modules on purpose: the
-            // real risk in this codebase is concurrency bugs and unhandled
-            // exceptions in long-running asyncio loops, not repo-wide style.
+            // Scoped to ingestion/shadow/control/usage_monitor on purpose:
+            // the real risk in this codebase is concurrency bugs and
+            // unhandled exceptions in long-running asyncio loops driving
+            // real electrical appliances, not repo-wide style.
             steps {
                 withSonarQubeEnv('sonarqube') {
-                    sh 'sonar-scanner -Dsonar.projectKey=iot-fleet-ota-platform'
+                    sh 'sonar-scanner -Dsonar.projectKey=home-automation-platform'
                 }
             }
         }
@@ -52,9 +50,9 @@ pipeline {
 
         stage('Build images') {
             steps {
-                sh 'docker build -t iot-fleet/api:${IMAGE_TAG} -f backend/Dockerfile.api backend'
-                sh 'docker build -t iot-fleet/core-engine:${IMAGE_TAG} -f backend/Dockerfile.engine backend'
-                sh 'docker build -t iot-fleet/frontend:${IMAGE_TAG} frontend'
+                sh 'docker build -t home-automation/api:${IMAGE_TAG} -f backend/Dockerfile.api backend'
+                sh 'docker build -t home-automation/core-engine:${IMAGE_TAG} -f backend/Dockerfile.engine backend'
+                sh 'docker build -t home-automation/frontend:${IMAGE_TAG} frontend'
             }
         }
     }

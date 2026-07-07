@@ -1,10 +1,10 @@
 """Async MQTT ingestion: the hot path this whole project exists to exercise.
 
 One long-lived aiomqtt session subscribes to every device's reported-state
-and heartbeat topics. Each message does a small, bounded amount of work
-(one upsert, one insert, maybe one rollout-event insert) so the loop never
-blocks on anything slow — that's the property SonarQube/the concurrency
-review is meant to catch regressions in.
+and heartbeat topics, plus unit/division meter readings. Each message does a
+small, bounded amount of work so the loop never blocks on anything slow —
+that's the property SonarQube/the concurrency review is meant to catch
+regressions in.
 """
 
 import asyncio
@@ -17,91 +17,104 @@ import asyncpg
 from app.config import (
     MQTT_HOST,
     MQTT_PORT,
-    TOPIC_HEARTBEAT_WILDCARD,
-    TOPIC_REPORTED_WILDCARD,
+    OFFLINE_AFTER_SECONDS,
+    TOPIC_DEVICE_HEARTBEAT_WILDCARD,
+    TOPIC_DEVICE_REPORTED_WILDCARD,
+    TOPIC_DIVISION_USAGE_WILDCARD,
+    TOPIC_UNIT_USAGE_WILDCARD,
 )
 
 logger = logging.getLogger("ingestion")
 
 
-def _device_id_from_topic(topic: str) -> str:
-    # devices/{id}/state/reported -> {id}; devices/{id}/heartbeat -> {id}
+def _id_from_topic(topic: str) -> str:
+    # devices/{id}/state/reported, devices/{id}/heartbeat,
+    # units/{id}/usage, divisions/{id}/usage -> {id} is always segment 1
     return topic.split("/")[1]
 
 
-async def _handle_reported(pool: asyncpg.Pool, device_id: str, payload: dict) -> None:
+async def _handle_device_reported(pool: asyncpg.Pool, device_id: str, payload: dict) -> None:
+    state = payload.get("state", {})
+    busy = payload.get("busy", False)
+    fault = payload.get("fault")
+
+    status = "fault" if fault else ("running_task" if busy else "online")
+
     async with pool.acquire() as conn:
         async with conn.transaction():
-            await conn.execute(
-                "INSERT INTO telemetry (device_id, payload) VALUES ($1, $2)",
-                device_id,
-                payload,
-            )
-            update_status = payload.pop("update_status", None)
             row = await conn.fetchrow(
                 """
                 UPDATE devices
                 SET reported_state = reported_state || $2::jsonb,
-                    firmware_version = COALESCE($3, firmware_version),
-                    status = 'online',
+                    status = $3,
                     last_seen = now()
                 WHERE id = $1
                 RETURNING id
                 """,
                 device_id,
-                payload,
-                payload.get("firmware_version"),
+                state,
+                status,
             )
             if row is None:
                 logger.warning("reported state for unknown device %s", device_id)
                 return
-
-            if update_status in ("applied", "failed"):
-                rollout = await conn.fetchrow(
-                    """
-                    SELECT id FROM rollouts
-                    WHERE status = 'running' AND $1 = ANY(target_device_ids)
-                    ORDER BY started_at DESC LIMIT 1
-                    """,
+            if fault:
+                await conn.execute(
+                    "INSERT INTO fault_logs (device_id, code, message) VALUES ($1, $2, $3)",
                     device_id,
+                    fault.get("code", "unknown"),
+                    fault.get("message", ""),
                 )
-                if rollout is not None:
-                    await conn.execute(
-                        """
-                        INSERT INTO rollout_events (rollout_id, device_id, status)
-                        VALUES ($1, $2, $3)
-                        ON CONFLICT (rollout_id, device_id) DO UPDATE SET status = $3, ts = now()
-                        """,
-                        rollout["id"],
-                        device_id,
-                        update_status,
-                    )
 
 
-async def _handle_heartbeat(pool: asyncpg.Pool, device_id: str) -> None:
+async def _handle_device_heartbeat(pool: asyncpg.Pool, device_id: str) -> None:
+    # A heartbeat only proves liveness, not an idle/busy transition — don't
+    # downgrade a device that's mid-task back to "online" just because it
+    # pinged in.
     await pool.execute(
-        "UPDATE devices SET status = 'online', last_seen = now() WHERE id = $1",
+        """
+        UPDATE devices SET status = 'online', last_seen = now()
+        WHERE id = $1 AND status = 'offline'
+        """,
         device_id,
+    )
+    await pool.execute("UPDATE devices SET last_seen = now() WHERE id = $1", device_id)
+
+
+async def _handle_usage(pool: asyncpg.Pool, scope_type: str, scope_id: str, payload: dict) -> None:
+    kwh = payload.get("kwh")
+    if kwh is None:
+        return
+    await pool.execute(
+        "INSERT INTO usage_readings (scope_type, scope_id, kwh) VALUES ($1, $2, $3)",
+        scope_type,
+        scope_id,
+        kwh,
     )
 
 
 async def ingestion_loop(pool: asyncpg.Pool) -> None:
     async with aiomqtt.Client(hostname=MQTT_HOST, port=MQTT_PORT) as client:
-        await client.subscribe(TOPIC_REPORTED_WILDCARD)
-        await client.subscribe(TOPIC_HEARTBEAT_WILDCARD)
-        logger.info("ingestion loop subscribed, listening for device messages")
+        await client.subscribe(TOPIC_DEVICE_REPORTED_WILDCARD)
+        await client.subscribe(TOPIC_DEVICE_HEARTBEAT_WILDCARD)
+        await client.subscribe(TOPIC_UNIT_USAGE_WILDCARD)
+        await client.subscribe(TOPIC_DIVISION_USAGE_WILDCARD)
+        logger.info("ingestion loop subscribed, listening for device and meter messages")
         async for message in client.messages:
             try:
                 topic = str(message.topic)
-                device_id = _device_id_from_topic(topic)
+                entity_id = _id_from_topic(topic)
                 if topic.endswith("/heartbeat"):
-                    await _handle_heartbeat(pool, device_id)
-                else:
-                    payload = json.loads(message.payload)
-                    await _handle_reported(pool, device_id, payload)
+                    await _handle_device_heartbeat(pool, entity_id)
+                elif topic.endswith("/state/reported"):
+                    await _handle_device_reported(pool, entity_id, json.loads(message.payload))
+                elif topic.startswith("units/") and topic.endswith("/usage"):
+                    await _handle_usage(pool, "unit", entity_id, json.loads(message.payload))
+                elif topic.startswith("divisions/") and topic.endswith("/usage"):
+                    await _handle_usage(pool, "division", entity_id, json.loads(message.payload))
             except Exception:
                 # one malformed/unexpected message must never kill the loop —
-                # thousands of other devices are still publishing on this connection
+                # every other device/meter is still publishing on this connection
                 logger.exception("failed to process message on %s", message.topic)
 
 
@@ -111,8 +124,6 @@ async def offline_sweep_loop(pool: asyncpg.Pool, interval_seconds: int = 10) -> 
     Runs alongside ingestion since a dead connection never sends a "going
     offline" message — absence has to be detected, not received.
     """
-    from app.config import OFFLINE_AFTER_SECONDS
-
     while True:
         await pool.execute(
             """
